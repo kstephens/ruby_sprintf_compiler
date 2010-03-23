@@ -1,4 +1,11 @@
 
+# Generates a Ruby expression suitable for a Proc or method
+# given a Kernel.sprintf format String.
+#
+# Copyright 2010 Kurt Stephens.
+#
+# http://github.com/kstephens/ruby_sprintf_compiler
+#
 class SprintfCompiler
   attr_accessor :format
   attr_reader :expr
@@ -444,7 +451,6 @@ END
   end
   alias :% :fmt
 
-  self.new("%s").fmt([ 123 ])
 end
 
 
