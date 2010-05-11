@@ -25,6 +25,10 @@ class SprintfCompiler
     instance(fmt) % args
   end
 
+  def self.fmt_splat fmt, *args
+    instance(fmt) % args
+  end
+
   def initialize f
     @format = f
   end
@@ -183,7 +187,6 @@ END
         radix_char << '.upcase' if typec == ?X
         arg_expr = gen_integer arg_expr
         direction = :rjust if @flags_zero
-        # pad = PAD_SPACE unless @flags_zero
         if ! (@flags_space || @flags_plus)
           pad_digit = gen_var "#{arg_expr} < 0 ? #{radix_char} : #{PAD_ZERO}"
           if @flags_zero

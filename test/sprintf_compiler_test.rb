@@ -11,6 +11,7 @@ end
 
 class AnyException < Exception; end
 
+$errors = 0
 def check fmt, args, opts = { }
   $stdout.puts <<"END"
 format:   #{fmt.inspect} % #{args.inspect}
@@ -51,6 +52,7 @@ END
   end
 
   if result != expected
+    $errors += 1
     $stdout.puts <<"END"
 ###########################################
 # ERROR:
@@ -82,8 +84,10 @@ check "%***s", [ 1 ]
 check "%d", [ nil ]
 check "%d", [ false ]
 check "%d", [ true ]
+check "%2$1$f", [3, 8.8888]
 
-[ '%', 's', 'c', 'd', 'x', 'b', 'X', 'f', 'e', 'g', 'E', 'G', 'p' ].map do | x |
+fmts = [ '%', 's', 'c', 'd', 'x', 'b', 'X', 'f', 'e', 'g', 'E', 'G', 'p' ] 
+fmts.map do | x |
   check "%*#{x}", [ ]
   check "%*#{x}", [ 1 ]
   check "%*#{x}", [ 1, 20 ]
@@ -94,7 +98,7 @@ check "%d", [ true ]
 end
 
 [ '', 
-  [ '%', 's', 'c', 'd', 'b', 'o', 'x', 'X', 'f', 'e', 'g', 'E', 'G', 'p' ].map do | x |
+  fmts.map do | x |
     [
      "%#{x}", 
      "%\##{x}", 
@@ -142,4 +146,17 @@ end
   end
 end
 
+################################################################
+
+class String
+  def % *args
+    SprintfCompiler.fmt(self, [ *args ])
+  end
+end
+
+require 'rubygems'
+gem 'mspec'
+load '../rubinius-kstephens/spec/ruby/core/string/modulo_spec.rb'
+
+exit $errors > 0 ? 1 : 0
 
