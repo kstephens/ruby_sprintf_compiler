@@ -13,9 +13,9 @@ class SprintfCompiler
   
   INSTANCE_CACHE = { }
   def self.instance fmt
-    unless instance = (fmt && INSTANCE_CACHE[fmt])
+    unless instance = (fmt && INSTANCE_CACHE[ [ fmt, fmt.tainted? ] ])
       fmt_dup = fmt.frozen? ? fmt : fmt.dup.freeze
-      instance = INSTANCE_CACHE[fmt_dup] = self.new(fmt_dup)
+      instance = INSTANCE_CACHE[ [ fmt_dup, fmt.tainted? ] ] = self.new(fmt_dup, fmt.tainted?)
       instance.define_format_method!
     end
     instance
@@ -33,13 +33,11 @@ class SprintfCompiler
 if @@validate
   def self.fmt_splat fmt, *args
     result = instance(fmt) % args
-    case RUBY_DESCRIPTION
-    when /^rubinius/
+    case
+    when rubinius?
       expected = Rubinius::Sprintf.new(fmt, *args).parse
-    when /^ruby/
-      expected = Kernel::sprintf(fmt, *args)
     else
-      expected = nil
+      expected = Kernel::sprintf(fmt, *args)
     end
     
     if result != expected
@@ -51,7 +49,7 @@ if @@validate
         end
 
       @@check_rb.puts %Q{
-  check #{fmt.dump}, #{args.dump}, :expected => #{expected.dump}
+  check #{fmt.dump}, #{args.dump}, :expected => #{expected.dump}, :tainted => #{expected.tainted?}
 }
       @@check_rb.flush
 
@@ -86,8 +84,9 @@ else
 end
 
 
-  def initialize f
+  def initialize f, f_tainted = false
     @format = f
+    @format_tainted = f_tainted # true if @format.tainted?
   end
 
   RADIXES = {?b => 2, ?o => 8, ?d => 10, ?i => 10, ?x => 16}
@@ -101,8 +100,10 @@ end
 
   ALTERNATIVES = {?o => "0", ?b => "0b", ?B => "0B", ?x => "0x", ?X => "0X"}
 
+  EMPTY_ARRAY  = [].freeze
   EMPTY_STRING = ''.freeze
   SPACE        = ' '.freeze
+  DOLLAR       = '$'.freeze
   HASH         = '#'.freeze
   ZERO         = '0'.freeze
   PLUS         = '+'.freeze
@@ -139,17 +140,21 @@ end
     @var_i = 0
     @stmts = [ ]
 
-
     f = @format
 
-    #           %flags        width   width_arg_pos  prec    prec_arg_pos    arg_pos    type
-    #           1             2       3              4       5               6          7
-    while m = /%([-+0# ]+)?(?:(\d+|\*+(\d+\$)?)?(?:\.(\d+|\*+(\d+\$)?))?)?(?:([1-9])\$)?([scdibBoxXfegEGp%])?/.match(f)
+    while m = /%/.match(f)
       # @m = m
       # $stderr.puts "m = #{m.to_a.inspect}"
       @prefix_expr = nil
 
       gen_str_lit m.pre_match
+      f = m.post_match
+
+      #      flags         width width_star             prec  prec_star      arg_pos type
+      #                              width_arg_pos              prec_arg_pos
+      #      1             2     3   4                  5     6  7           8       9
+      m = /\A([-+0# ]+)?(?:(\d+)|(\*+(\d+\$)?))?(?:\.(?:(\d+)|(\*+(\d+\$)?)))?((?:\d+\$)+)?([scdibBoxXfegEGp%])/.match(f)
+      return gen_error(ArgumentError, "illegal format string - %#{f}") unless m
       f = m.post_match
 
       flags = m[1] || EMPTY_STRING
@@ -159,35 +164,46 @@ end
       @flags_space = flags.include?(SPACE)
       @flags_alternative = flags.include?(HASH)
 
-      @width = m[2]
-      @width_star = @width && @width.count(STAR)
-      @width_star = nil if @width_star && @width_star < 1
-      @width_arg_pos = m[3]
-      @width_arg_pos &&= @width_arg_pos.to_i
       @width_pad = nil
+      @width = m[2]
 
-      @precision = m[4]
-      @precision_star = @precision && @precision.count(STAR)
-      @precision_star = nil if @precision_star && @precision_star < 1
-      @precision_arg_pos = m[5]
-      @precision_arg_pos &&= @precision_arg_pos.to_i
+      @width_star = m[3]
+      @width_star &&= @width_star.count(STAR)
+      @width_star = nil if @width_star && @width_star < 1
+
+      @width_arg_pos = m[4]
+      @width_arg_pos &&= @width_arg_pos.to_i
+
       @precision_pad = nil
+      @precision = m[5]
 
-      @arg_pos = m[6]
+      @precision_star = m[6]
+      @precision_star &&= @precision_star.count(STAR)
+      @precision_star = nil if @precision_star && @precision_star < 1
+
+      @precision_arg_pos = m[7]
+      @precision_arg_pos &&= @precision_arg_pos.to_i
+
+      @arg_pos = m[8]
+      if @arg_pos && @arg_pos.count(DOLLAR) > 1
+        return gen_error(ArgumentError, "value given twice - 1$")
+      end
       @arg_pos &&= @arg_pos.to_i
 
       @limit = nil
-      unless type = m[7]
-        return gen_error(ArgumentError, "illegal format string - #{m[0].gsub(flags, EMPTY_STRING)}")
-      end
-
+      
+      type = m[9]
       typec = type && type[0]
 
       if typec == ?%
-        if @arg_pos || @width_star # "%$1%" or "%*%"
-          gen_arg @arg_pos
-        end
-        if @width || @flags_alternative || @flags_space || @flags_zero
+        case
+        when @width_star # %*%
+          gen_arg
+          # return gen_error(ArgumentError, "illegal format character - #{type}")
+        when @arg_pos # "%$1%"
+          gen_arg @arg_pos 
+          # return gen_error(ArgumentError, "illegal format character - #{type}$")
+        when @width || @flags_alternative || @flags_space || @flags_zero
           return gen_error(ArgumentError, "illegal format character - #{type}")
         end
         gen_str_lit(PERCENT)
@@ -213,6 +229,7 @@ end
 
       # Get the value argument.
       arg_expr = gen_arg @arg_pos
+      
       break if @error_class
 
       @direction = @flags_minus ? :ljust : :rjust
@@ -222,15 +239,18 @@ end
       expr = nil
       case typec
       when ?s
+        arg_expr = gen_tainted arg_expr
         @width_pad = PAD_SPACE
         @limit = @precision
         expr = "#{arg_expr}.to_s"
 
       when ?c
+        arg_expr = gen_tainted arg_expr
         @width_pad = PAD_SPACE
         arg_expr = gen_var arg_expr
         gen_stmt "#{arg_expr} = #{arg_expr}.to_int if #{arg_expr}.respond_to?(:to_int)"
-        gen_stmt %Q{raise RangeError, "bignum too big to convert into \`long'" unless Fixnum === #{arg_expr}}
+        range_error = rubinius? ? ArgumentError : RangeError
+        gen_stmt %Q{raise #{range_error}, "bignum too big to convert into \`long'" unless Fixnum === #{arg_expr}}
         expr = "::#{self.class.name}::CHAR_TABLE[#{arg_expr} % 256]"
         @debug = true
 
@@ -357,16 +377,23 @@ END
         # $stdout.puts "  fmt = #{fmt.inspect}"
 
         expr = arg_expr
-        # expr = "#{arg_expr}.to_f"
+        expr = "Float(#{expr})"
 
-        case RUBY_DESCRIPTION
-        when /^ruby/
+        case
+        when rubinius?
+          expr = "(#{expr}).send(:to_s_formatted, #{fmt})"
+        else
           expr = "Kernel.sprintf(#{fmt}, #{expr})"
-        when /^rubinius/
-          expr = "#{expr}.send(:to_s_formatted, #{fmt})"
+        end
+
+        # "INF" .vs. "Inf"
+        case typec
+        when ?E, ?G, ?F
+          expr = "(#{expr}).upcase"
         end
 
       when ?p
+        arg_expr = gen_tainted arg_expr
         @width_pad = PAD_SPACE
         @limit = @precision
         expr = "#{arg_expr}.inspect"
@@ -393,6 +420,18 @@ END
 
     self
   end
+
+  def self.rubinius?
+    (
+     @@rubinius ||= 
+     [ RUBY_DESCRIPTION =~ /^rubinius/ ]
+     ).first
+  end
+
+  def rubinius?
+    self.class.rubinius?
+  end
+
 
   ####################################################################
   # Code generation
@@ -529,14 +568,25 @@ END
   # Generate a string output expression in the final @str_template.
   def gen_str_expr expr
     # peephole optimization for Integer#to_s(10).
-    expr.sub!(/\.to_s\(10\)$/, '.to_s') 
+    expr.sub!(/\.to_s\(10\)\Z/, '.to_s') 
 
     # peephole optimization for implicit #to_s call during #{...}
-    expr.sub!(/\.to_s$/, '') 
+    expr.sub!(/\.to_s\Z/, '') 
 
     @str_template << '#{' << expr << '}'
   end
-  
+
+  # Generate tainted argument checks.
+  def gen_tainted expr
+    # Don't bother checking expr tainted? if format is tainted.
+    unless @format_tainted
+      expr = gen_var expr
+      gen_stmt "tainted ||= #{expr}.tainted?"
+    end
+    expr
+  end
+
+
   ####################################################################
   # Ruby compilation and invocation.
   #
@@ -558,8 +608,11 @@ END
     @proc_expr ||= 
       compile! && <<"END"
   #{arg_check_expr}
+  tainted = #{@format_tainted}
   #{@stmts * "\n"}
-  "#{@str_template}"
+  result = "#{@str_template}"
+  result.taint if tainted
+  result
 END
   end
 

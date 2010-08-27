@@ -98,6 +98,8 @@ check "%d", [ false ]
 check "%d", [ true ]
 check "%2$1$f", [3, 8.8888]
 
+check "%1$g", [ 10 ], :expected => "10"
+
 # Rubinius::Sprintf oddities
 check "%*1$.*2$3$d", [10, 5, 1], :expected => "     00001"
 check "%.7b", [-5], :expected => "1111011"
