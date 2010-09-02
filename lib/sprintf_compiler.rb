@@ -110,6 +110,7 @@ end
   MINUS        = '-'.freeze
   STAR         = '*'.freeze
   PERCENT      = '%'.freeze
+  NEWLINE      = "\n".freeze
   DOT          = '.'.freeze
   DOTDOT       = '..'.freeze
   DQUOTE       = '"'.freeze
@@ -193,6 +194,7 @@ end
       @limit = nil
       
       type = m[9]
+      type = PERCENT if type == NEWLINE
       typec = type && type[0]
 
       if typec == ?%
@@ -393,7 +395,7 @@ END
         end
 
       when ?p
-        arg_expr = gen_tainted arg_expr
+        # arg_expr = gen_tainted arg_expr
         @width_pad = PAD_SPACE
         @limit = @precision
         expr = "#{arg_expr}.inspect"
@@ -637,8 +639,10 @@ end
     compile!
     instance_eval <<"END"
 def self.fmt args
-  # $stderr.puts "\#{self}.fmt \#{@format.inspect} \#{args.inspect}\n\#{caller.inspect}"
+  # $stderr.puts "\#{self}.fmt \#{@format.inspect} \#{args.inspect}\n\#{caller.inspect}\n"
   #{proc_expr}
+rescue Exception => exc
+  raise exc.class, ("\#{exc}\n" << #{proc_expr.inspect})
 end
 alias :% :fmt
 END
